@@ -13,6 +13,8 @@
 #include <string.h>
 #include <time.h>
 #include <inttypes.h>
+#include <pthread.h>
+
 #include "lodepng.h"
 #include "zlib.h"
 
@@ -29,8 +31,15 @@ FILE *timestamps;
 uint8_t hasStarted = 0;//Changes to 1 when first data frame is received
 uint8_t firstSeqReceived = 0;
 unsigned int highestSeq = 0, lowestSeq = 0;
-clock_t lastframeTime;
+volatile clock_t lastframeTime;
 unsigned int frameCounter = 1;
+
+//Queue declaration
+struct Queue* queue;
+
+//Multithreading
+pthread_mutex_t lock;
+pthread_t tid;
 
 //Timestamp variables
 long ms;
@@ -52,6 +61,77 @@ struct sizeData//Struct for storing currSize variables(variables that store amou
 	uint16_t sequence;
 	uint32_t size;
 };
+
+//Queue stuff
+// A linked list (LL) node to store a queue entry 
+struct QNode
+{
+    struct tempCompData* data; 
+    struct QNode* next; 
+}; 
+  
+// The queue, front stores the front node of LL and rear stores the 
+// last node of LL 
+struct Queue
+{
+    struct QNode *front, *rear;
+}; 
+  
+// A utility function to create a new linked list node. 
+struct QNode* newNode(struct tempCompData* data) 
+{ 
+    struct QNode* temp = (struct QNode*)malloc(sizeof(struct QNode)); 
+    temp->data = malloc(sizeof(struct tempCompData));
+    memcpy(temp->data, data, sizeof(struct tempCompData));
+    
+    temp->next = NULL; 
+    return temp;
+} 
+  
+// A utility function to create an empty queue 
+struct Queue* createQueue() 
+{ 
+    struct Queue* q = (struct Queue*)malloc(sizeof(struct Queue)); 
+    q->front = q->rear = NULL; 
+    return q; 
+} 
+  
+void enQueue(struct Queue* q, struct tempCompData* data) 
+{ 
+    // Create a new LL node 
+    struct QNode* temp = newNode(data); 
+  
+    // If queue is empty, then new node is front and rear both 
+    if (q->rear == NULL)
+    { 
+		q->front = q->rear = temp; 
+        return; 
+    } 
+  
+    // Add the new node at the end of queue and change rear 
+    q->rear->next = temp; 
+    q->rear = temp; 
+} 
+
+struct tempCompData* deQueue(struct Queue* q) 
+{ 
+    // If queue is empty, return NULL. 
+    if (q->front == NULL) 
+        return NULL;
+  
+    // Store previous front and move front one node ahead 
+    struct QNode* temp = q->front;
+    struct tempCompData* data = temp->data; 
+    free(temp);
+  
+    q->front = q->front->next; 
+  
+    // If front becomes NULL, then change rear also as NULL 
+    if (q->front == NULL) 
+        q->rear = NULL; 
+    return data; 
+}
+
 
 /**
  *  changeEndian  - Change endianness
@@ -116,6 +196,26 @@ void copyFile(FILE* dest,FILE* src,long int srcSize)//Appends all data in src to
 	fwrite(data,strayBytes,1,dest);
 }
 
+void* processQueue(void* queue)
+{
+  while(1)
+  {
+    pthread_mutex_lock(&lock);
+    struct tempCompData* data = deQueue(queue);
+    pthread_mutex_unlock(&lock); 
+
+    if((clock()/CLOCKS_PER_SEC >= lastframeTime + RECV_TIMEOUT) && data == NULL && hasStarted == 1)
+    {
+      return NULL;
+    }
+
+    if(data != NULL)
+    {
+      fwrite(data, sizeof(struct tempCompData), 1, compTemp);
+    }
+  }
+}
+
 void vmac_register(void* ptr);
 void del_name(char* interest_name, uint16_t name_len);
 void send_vmac(uint16_t type, uint16_t rate, uint16_t seq, char *buff, uint16_t len, char * interest_name, uint16_t name_len);
@@ -148,8 +248,12 @@ void recv_frame(uint8_t type, uint64_t enc, char * buff, uint16_t len, uint16_t 
 		*/
 		
 		writeCompStruct(&toWrite,len,seq,buff);
-		fwrite(&toWrite,sizeof(struct tempCompData),1,compTemp);
-		
+		//fwrite(&toWrite,sizeof(struct tempCompData),1,compTemp);
+
+		pthread_mutex_lock(&lock); 
+		enQueue(queue, &toWrite);
+		pthread_mutex_unlock(&lock);
+
 		hasStarted = 1;
 		
 		if(firstSeqReceived==0)
@@ -168,7 +272,7 @@ void recv_frame(uint8_t type, uint64_t enc, char * buff, uint16_t len, uint16_t 
 		
 		lastframeTime = clock()/CLOCKS_PER_SEC;//Records frame time for the receiver timeout
 		
-		fprintf(timestamps,"Received Frame @ timestamp=%lu %"PRIdMAX".%03ld - Count: %u\n",(unsigned long)time(NULL),(intmax_t)sec, ms, frameCounter);
+		//fprintf(timestamps,"Received Frame @ timestamp=%lu %"PRIdMAX".%03ld - Count: %u\n",(unsigned long)time(NULL),(intmax_t)sec, ms, frameCounter);
 		frameCounter++;
 		receivedSize += len;
 	}
@@ -193,7 +297,7 @@ int main()
 	char fileName[255];
 	char intname[BUFFER_SIZE];
 	
-	//User input for file name, interest name, and the number of receivers to wait for
+	//User input for file name, interest name, and timeout before returning data to receivers
 	printf("Enter name of file to obtain: ");
 	scanf("%s",fileName);
 	
@@ -206,14 +310,27 @@ int main()
 	uint16_t len = strlen(data)+1;
 	uint16_t name_len = strlen(intname);
 	
-	
+	//Queue Initialization
+	queue = createQueue();
+
+	//Thread stuff
+	if (pthread_mutex_init(&lock, NULL) != 0) 
+	{ 
+		printf("\n mutex init has failed\n"); 
+		return 1; 
+	} 
+
+	int threadError = pthread_create(&tid, NULL, processQueue, queue);
+	if (threadError != 0) 
+		printf("\nThread can't be created :[%s]", strerror(threadError));
+
 	//Creating temp files to write struct with data frame and associated sequence number
 	compTemp = fopen("compTemp", "wb+");//Received compressed data
 	
 	if (compTemp == NULL) 
     {   
 		printf("Error! Could not open temporary file\n"); 
-        exit(-1);
+		exit(-1);
     }
 	
 	timestamps = fopen("timestamps", "w");//Received compressed data
@@ -223,7 +340,6 @@ int main()
 		printf("Error! Could not open timestamp file\n"); 
         exit(-1);
     }
-	
 	
 	clock_gettime(CLOCK_REALTIME,&spec);
 	sec=spec.tv_sec;
@@ -239,14 +355,9 @@ int main()
 	send_vmac(0,0,0,data,len,intname,name_len);
 	printf("Interest Sent\n");
 	
-	
-	while(/*isDone!=*/1)//Waiting for data to be received
-	{
-		if(hasStarted==1 && (clock()/CLOCKS_PER_SEC >= lastframeTime + RECV_TIMEOUT))
-		{
-			break;
-		}
-	}
+	//Waits for other thread to finish writing data to file
+	pthread_join(tid, NULL);
+	pthread_mutex_destroy(&lock);
 	
 	fprintf(timestamps,"Data Received @ timestamp=%lu %"PRIdMAX".%03ld\n",(unsigned long)time(NULL),(intmax_t)sec, ms);
 
