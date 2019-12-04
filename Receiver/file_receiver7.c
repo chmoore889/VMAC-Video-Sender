@@ -6,6 +6,7 @@
 //Version 5 - Added decompression for received data & user interface
 //Version 6 - Allowed for increased size of decompressed data in each frame
 //Version 7 - Added ability for partial video recovery with frame loss in mp4 and mov
+//11/12/2019 update - Added linked-list queue that stores received data to be processed by a separate thread
 
 #include <stdio.h>
 #include <stdint.h>
@@ -63,21 +64,20 @@ struct sizeData//Struct for storing currSize variables(variables that store amou
 };
 
 //Queue stuff
-// A linked list (LL) node to store a queue entry 
+//A linked list (LL) node to store a queue entry 
 struct QNode
 {
     struct tempCompData* data; 
     struct QNode* next; 
 }; 
   
-// The queue, front stores the front node of LL and rear stores the 
-// last node of LL 
+//The queue, front stores the front node of LL and rear stores the last node of LL 
 struct Queue
 {
     struct QNode *front, *rear;
 }; 
   
-// A utility function to create a new linked list node. 
+//A utility function to create a new linked list node. 
 struct QNode* newNode(struct tempCompData* data) 
 { 
     struct QNode* temp = (struct QNode*)malloc(sizeof(struct QNode)); 
@@ -88,7 +88,7 @@ struct QNode* newNode(struct tempCompData* data)
     return temp;
 } 
   
-// A utility function to create an empty queue 
+//A utility function to create an empty queue 
 struct Queue* createQueue() 
 { 
     struct Queue* q = (struct Queue*)malloc(sizeof(struct Queue)); 
